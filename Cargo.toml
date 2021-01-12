@@ -1,5 +1,5 @@
 [package]
-name = "try_tensorflow"
+name = "estimate_ml_fee"
 version = "0.1.0"
 authors = ["Riccardo Casatta <riccardo@casatta.it>"]
 edition = "2018"
