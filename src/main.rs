@@ -1,19 +1,22 @@
+use bitcoincore_rpc::bitcoin::hashes::hex::FromHex;
 use bitcoincore_rpc::bitcoin::Txid;
+use bitcoincore_rpc::jsonrpc::serde_json::Value;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use chrono::{DateTime, Datelike, Timelike, Utc};
-use log::info;
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::iter::FromIterator;
+use std::ops::Sub;
+use std::path::PathBuf;
 use structopt::StructOpt;
 use tensorflow::{Graph, SavedModelBundle, SessionOptions, SessionRunArgs, Tensor};
-use std::path::PathBuf;
 
 #[derive(StructOpt, Debug)]
 pub struct EstimateOptions {
-    /// the number of blocks I am ok to wait for
+    /// the number of blocks I am ok to wait for, must be between 1 (included) and 1008 (included)
     #[structopt(long)]
-    pub blocks: u16,
+    pub blocks_target: u16,
 
     /// The path where the model is saved
     #[structopt(long)]
@@ -52,26 +55,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     info!("start");
     let options = EstimateOptions::from_args();
+    if options.blocks_target == 0 || options.blocks_target > 1008 {
+        error!("--blocks-target should be between 1 (included) and 1008 (included)");
+        return Ok(());
+    }
 
     let model = load_model(&options.model_path)?;
 
-    let mut model_inputs = ModelInputs::default();
+    let mut inputs = ModelInputs::default();
     let utc: DateTime<Utc> = Utc::now();
-    model_inputs.ints.insert(
-        "day_of_week".to_string(),
-        utc.weekday().num_days_from_monday() as i64,
+    let day_of_week = utc.weekday().num_days_from_monday() as i64;
+    let target = options.blocks_target as f32;
+    let hour = utc.hour() as i64;
+    inputs.ints.insert("day_of_week".to_string(), day_of_week);
+    inputs.ints.insert("hour".to_string(), hour);
+    inputs.floats.insert("confirms_in".to_string(), target);
+
+    calculate_buckets(&mut inputs, &options)?;
+
+    let estimate = predict(inputs, model)?;
+    info!(
+        "Estimated fee to enter in {} blocks is {:?} sat/vbyte",
+        options.blocks_target, estimate
     );
-    model_inputs
-        .ints
-        .insert("hour".to_string(), utc.hour() as i64);
-    model_inputs
-        .floats
-        .insert("confirms_in".to_string(), options.blocks as f32);
-
-    call_node(&mut model_inputs, &options)?;
-
-    let estimate = call_model(model_inputs, model)?;
-    info!("Estimated fee to enter in {} blocks is {:?} sat/vbyte", options.blocks, estimate);
 
     Ok(())
 }
@@ -82,7 +88,12 @@ struct ModelInputs {
     pub ints: HashMap<String, i64>,
 }
 
-fn call_node(data: &mut ModelInputs, options: &EstimateOptions) -> Result<(), Box<dyn Error>> {
+fn calculate_buckets(
+    data: &mut ModelInputs,
+    options: &EstimateOptions,
+) -> Result<(), Box<dyn Error>> {
+    let old: DateTime<Utc> = Utc::now().sub(Duration::hours(2));
+    info!("old is {}", old);
     let client = options.node_config.make_rpc_client()?;
 
     let mut blocks_to_ask = vec![];
@@ -103,13 +114,25 @@ fn call_node(data: &mut ModelInputs, options: &EstimateOptions) -> Result<(), Bo
         }
     }
 
-    let mut mempool_txid = client.get_raw_mempool()?;
-    mempool_txid.reverse();
+    let test: Value = client.call("getrawmempool", &[Value::Bool(true)])?;
 
-    info!("asking mempool txs {:?}", mempool_txid.len());
+    let mut mempool_txid = vec![];
+    let mut all = 0;
+    for (k, v) in test.as_object().unwrap().iter() {
+        all += 1;
+        let t = v.get("time").unwrap().as_i64().unwrap();
+        let utc = Utc.timestamp(t, 0);
+        if utc > old {
+            // if a tx in mempool is too old, it's unlikely it has tx inputs in last 6 blocks
+            // this way we are asking a lot less txs to the node for big mempools
+            mempool_txid.push(Txid::from_hex(k)?);
+        }
+    }
+
+    info!("all mempool txs {}, not old: {}", all, mempool_txid.len());
     let mut count = 0;
     let mut mempool_bucket = MempoolBuckets::new(50, 500.0);
-    for (i,txid) in mempool_txid.iter().enumerate() {
+    for (i, txid) in mempool_txid.iter().enumerate() {
         if let Some(limit) = options.limit.as_ref() {
             if *limit < i {
                 break;
@@ -139,10 +162,16 @@ fn call_node(data: &mut ModelInputs, options: &EstimateOptions) -> Result<(), Bo
         "mempool_txid:{} of which with input in last 6 blocks:{} ({:.1}%)",
         mempool_txid.len(),
         count,
-        (count as f64 * 100.0)/(mempool_txid.len() as f64)
+        (count as f64 * 100.0) / (mempool_txid.len() as f64)
     );
 
     info!("mempool buckets {:?}", mempool_bucket.buckets);
+    let tx_considered = mempool_bucket.buckets.iter().sum::<u32>();
+    if tx_considered == 0 {
+        error!("Can't estimate any tx fee rate in mempool, estimation could be very bad...")
+    } else if tx_considered < 100 {
+        warn!("Could estimate less than 100 tx fee rate in mempool, estimation could be bad...")
+    }
 
     for (i, v) in mempool_bucket.buckets.iter().enumerate() {
         data.floats.insert(format!("a{}", i), *v as f32);
@@ -161,7 +190,7 @@ fn load_model(model_path: &PathBuf) -> Result<(Graph, SavedModelBundle), Box<dyn
     Ok((graph, bundle))
 }
 
-fn call_model(inputs: ModelInputs, model: (Graph,SavedModelBundle) ) -> Result<f32, Box<dyn Error>> {
+fn predict(inputs: ModelInputs, model: (Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
     let (graph, bundle) = model;
     let sig = bundle
         .meta_graph_def()
