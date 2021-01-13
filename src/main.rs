@@ -92,27 +92,28 @@ fn call_node(data: &mut ModelInputs, node_config: &NodeConfig) -> Result<(), Box
     }
 
     let mempool_txid = client.get_raw_mempool()?;
-
+    info!("asking mempool txs {:?}", mempool_txid.len());
     let mut count = 0;
     let mut mempool_bucket = MempoolBuckets::new(50, 500.0);
     for txid in mempool_txid.iter() {
-        let tx_result = client.get_raw_transaction_info(txid, None)?;
-        let tx = tx_result.transaction()?;
-        let prev_out_value: Vec<_> = tx
-            .input
-            .iter()
-            .filter_map(|i| {
-                txs.get(&i.previous_output.txid)
-                    .map(|tx| tx.output[i.previous_output.vout as usize].value)
-            })
-            .collect();
-        if prev_out_value.len() == tx.input.len() {
-            count += 1;
-            let sum_input: u64 = prev_out_value.iter().sum();
-            let sum_outut: u64 = tx.output.iter().map(|o| o.value).sum();
-            let fee = sum_input - sum_outut;
-            let fee_rate = (fee as f64) / (tx.get_weight() as f64 / 4.0);
-            mempool_bucket.add(*txid, fee_rate);
+        // get_raw_transaction should always work for mempool txs, however some tx may have been replaced
+        if let Ok(tx) = client.get_raw_transaction(txid, None) {
+            let prev_out_value: Vec<_> = tx
+                .input
+                .iter()
+                .filter_map(|i| {
+                    txs.get(&i.previous_output.txid)
+                        .map(|tx| tx.output[i.previous_output.vout as usize].value)
+                })
+                .collect();
+            if prev_out_value.len() == tx.input.len() {
+                count += 1;
+                let sum_input: u64 = prev_out_value.iter().sum();
+                let sum_outut: u64 = tx.output.iter().map(|o| o.value).sum();
+                let fee = sum_input - sum_outut;
+                let fee_rate = (fee as f64) / (tx.get_weight() as f64 / 4.0);
+                mempool_bucket.add(*txid, fee_rate);
+            }
         }
     }
     info!(
