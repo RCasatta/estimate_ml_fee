@@ -7,6 +7,7 @@ use std::error::Error;
 use std::iter::FromIterator;
 use structopt::StructOpt;
 use tensorflow::{Graph, SavedModelBundle, SessionOptions, SessionRunArgs, Tensor};
+use std::path::PathBuf;
 
 #[derive(StructOpt, Debug)]
 pub struct EstimateOptions {
@@ -14,8 +15,16 @@ pub struct EstimateOptions {
     #[structopt(long)]
     pub blocks: u16,
 
+    /// The path where the model is saved
+    #[structopt(long)]
+    pub model_path: PathBuf,
+
     #[structopt(flatten)]
     pub node_config: NodeConfig,
+
+    /// Stop considering `limit` tx of the mempool, by default consider all txs
+    #[structopt(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -44,6 +53,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("start");
     let options = EstimateOptions::from_args();
 
+    let model = load_model(&options.model_path)?;
+
     let mut model_inputs = ModelInputs::default();
     let utc: DateTime<Utc> = Utc::now();
     model_inputs.ints.insert(
@@ -57,9 +68,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .floats
         .insert("confirms_in".to_string(), options.blocks as f32);
 
-    call_node(&mut model_inputs, &options.node_config)?;
+    call_node(&mut model_inputs, &options)?;
 
-    call_model(model_inputs)?;
+    let estimate = call_model(model_inputs, model)?;
+    info!("Estimated fee to enter in {} blocks is {:?} sat/vbyte", options.blocks, estimate);
 
     Ok(())
 }
@@ -70,8 +82,8 @@ struct ModelInputs {
     pub ints: HashMap<String, i64>,
 }
 
-fn call_node(data: &mut ModelInputs, node_config: &NodeConfig) -> Result<(), Box<dyn Error>> {
-    let client = node_config.make_rpc_client()?;
+fn call_node(data: &mut ModelInputs, options: &EstimateOptions) -> Result<(), Box<dyn Error>> {
+    let client = options.node_config.make_rpc_client()?;
 
     let mut blocks_to_ask = vec![];
     let best_block_hash = client.get_best_block_hash()?;
@@ -91,11 +103,18 @@ fn call_node(data: &mut ModelInputs, node_config: &NodeConfig) -> Result<(), Box
         }
     }
 
-    let mempool_txid = client.get_raw_mempool()?;
+    let mut mempool_txid = client.get_raw_mempool()?;
+    mempool_txid.reverse();
+
     info!("asking mempool txs {:?}", mempool_txid.len());
     let mut count = 0;
     let mut mempool_bucket = MempoolBuckets::new(50, 500.0);
-    for txid in mempool_txid.iter() {
+    for (i,txid) in mempool_txid.iter().enumerate() {
+        if let Some(limit) = options.limit.as_ref() {
+            if *limit < i {
+                break;
+            }
+        }
         // get_raw_transaction should always work for mempool txs, however some tx may have been replaced
         if let Ok(tx) = client.get_raw_transaction(txid, None) {
             let prev_out_value: Vec<_> = tx
@@ -117,12 +136,13 @@ fn call_node(data: &mut ModelInputs, node_config: &NodeConfig) -> Result<(), Box
         }
     }
     info!(
-        "mempool_txid:{} of which with input in blocks:{}",
+        "mempool_txid:{} of which with input in last 6 blocks:{} ({:.1}%)",
         mempool_txid.len(),
-        count
+        count,
+        (count as f64 * 100.0)/(mempool_txid.len() as f64)
     );
 
-    info!("{:?}", mempool_bucket.buckets);
+    info!("mempool buckets {:?}", mempool_bucket.buckets);
 
     for (i, v) in mempool_bucket.buckets.iter().enumerate() {
         data.floats.insert(format!("a{}", i), *v as f32);
@@ -131,16 +151,18 @@ fn call_node(data: &mut ModelInputs, node_config: &NodeConfig) -> Result<(), Box
     Ok(())
 }
 
-fn call_model(inputs: ModelInputs) -> Result<(), Box<dyn Error>> {
-    let export_dir = "20210111-164919-model/";
-
+fn load_model(model_path: &PathBuf) -> Result<(Graph, SavedModelBundle), Box<dyn Error>> {
     const MODEL_TAG: &str = "serve";
     let mut graph = Graph::new();
     info!("loading");
     let bundle =
-        SavedModelBundle::load(&SessionOptions::new(), &[MODEL_TAG], &mut graph, export_dir)?;
+        SavedModelBundle::load(&SessionOptions::new(), &[MODEL_TAG], &mut graph, model_path)?;
     info!("loaded");
+    Ok((graph, bundle))
+}
 
+fn call_model(inputs: ModelInputs, model: (Graph,SavedModelBundle) ) -> Result<f32, Box<dyn Error>> {
+    let (graph, bundle) = model;
     let sig = bundle
         .meta_graph_def()
         .get_signature(tensorflow::DEFAULT_SERVING_SIGNATURE_DEF_KEY)?;
@@ -180,9 +202,8 @@ fn call_model(inputs: ModelInputs) -> Result<(), Box<dyn Error>> {
 
     bundle.session.run(&mut run_args)?;
     let output = run_args.fetch::<f32>(output_fetch)?;
-    info!("{:?}", output[0]);
 
-    Ok(())
+    Ok(output[0])
 }
 
 pub struct MempoolBuckets {
