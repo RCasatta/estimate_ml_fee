@@ -9,7 +9,7 @@ Get needed informations from a running local bitcoin core node (pruned nodes are
 ## Example
 
 ```
-$ cargo run --release -- --blocks-target 30 --cookie-path $HOME/.bitcoin/.cookie --rpc-address http://127.0.0.1:8332 --model-path 20210111-164919-model
+$ cargo run --release -- --blocks-target 30 --cookie-path $HOME/.bitcoin/.cookie --rpc-address http://127.0.0.1:8332 --model-path 20210113-160351-model
 ...
 [2021-01-13T14:56:17Z INFO  estimate_ml_fee] all mempool txs 8265, not old: 3807
 [2021-01-13T14:56:18Z INFO  estimate_ml_fee] mempool_txid:3807 of which with input in last 6 blocks:348 (9.1%)
