@@ -12,11 +12,24 @@ use std::path::PathBuf;
 use structopt::StructOpt;
 use tensorflow::{Graph, SavedModelBundle, SessionOptions, SessionRunArgs, Tensor};
 
+/*
+Next: 129.6 sat/byte  $12.47
+1h:   122.5 sat/byte  $11.80
+6h:   50.6 sat/byte  $4.88
+12h:  21.1 sat/byte  $2.03
+1d:   14.1 sat/byte  $1.36
+3d:    8.0 sat/byte  $0.77
+1wk:   1.1 sat/byte  $0.11
+Min:   1.9 sat/byte  $0.19
+Block height: 666,154
+*/
+
 #[derive(StructOpt, Debug)]
 pub struct EstimateOptions {
     /// the number of blocks I am ok to wait for, must be between 1 (included) and 1008 (included)
+    /// if absent standard targets `[1,6,36,72,144,432,1008]` are used
     #[structopt(long)]
-    pub blocks_target: u16,
+    pub blocks_target: Vec<u16>,
 
     /// The path where the model is saved
     #[structopt(long)]
@@ -55,29 +68,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     info!("start");
     let options = EstimateOptions::from_args();
-    if options.blocks_target == 0 || options.blocks_target > 1008 {
-        error!("--blocks-target should be between 1 (included) and 1008 (included)");
-        return Ok(());
+
+    let mut targets = vec![1, 6, 36, 72, 144, 432, 1008];
+    for blocks_target in options.blocks_target.iter() {
+        if *blocks_target == 0 ||    *blocks_target > 1008 {
+            error!("--blocks-target should be between 1 (included) and 1008 (included)");
+            return Ok(());
+        }
+        targets.push(*blocks_target);
     }
+    targets.sort();
 
     let model = load_model(&options.model_path)?;
 
     let mut inputs = ModelInputs::default();
     let utc: DateTime<Utc> = Utc::now();
     let day_of_week = utc.weekday().num_days_from_monday() as i64;
-    let target = options.blocks_target as f32;
+    //let target = options.blocks_target as f32;
     let hour = utc.hour() as i64;
     inputs.ints.insert("day_of_week".to_string(), day_of_week);
     inputs.ints.insert("hour".to_string(), hour);
-    inputs.floats.insert("confirms_in".to_string(), target);
 
     calculate_buckets(&mut inputs, &options)?;
 
-    let estimate = predict(inputs, model)?;
-    info!(
-        "Estimated fee to enter in {} blocks is {:?} sat/vbyte",
-        options.blocks_target, estimate
-    );
+
+    for confirms_in in targets.iter() {
+        //TODO the model should probably be fed with arrays and only one predict call
+        inputs
+            .floats
+            .insert("confirms_in".to_string(), *confirms_in as f32);
+        let estimate = predict(&inputs, &model)?;
+        info!(
+            "Estimated fee to enter in {} blocks is {:?} sat/vbyte",
+            confirms_in, estimate
+        );
+    }
 
     Ok(())
 }
@@ -190,7 +215,7 @@ fn load_model(model_path: &PathBuf) -> Result<(Graph, SavedModelBundle), Box<dyn
     Ok((graph, bundle))
 }
 
-fn predict(inputs: ModelInputs, model: (Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
+fn predict(inputs: &ModelInputs, model: &(Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
     let (graph, bundle) = model;
     let sig = bundle
         .meta_graph_def()
@@ -199,20 +224,20 @@ fn predict(inputs: ModelInputs, model: (Graph, SavedModelBundle)) -> Result<f32,
     //info!("{:#?}", sig.outputs());
 
     let mut float_inputs_args = vec![];
-    for (k, v) in inputs.floats {
+    for (k, v) in inputs.floats.iter() {
         let input_info = sig.get_input(&k)?;
         let input_op = graph.operation_by_name_required(&input_info.name().name)?;
         let input_index = input_info.name().index;
-        let input_tensor = Tensor::<f32>::new(&[1, 1]).with_values(&[v])?;
+        let input_tensor = Tensor::<f32>::new(&[1, 1]).with_values(&[*v])?;
         float_inputs_args.push((input_op, input_index, input_tensor));
     }
 
     let mut int_inputs_args = vec![];
-    for (k, v) in inputs.ints {
+    for (k, v) in inputs.ints.iter() {
         let input_info = sig.get_input(&k)?;
         let input_op = graph.operation_by_name_required(&input_info.name().name)?;
         let input_index = input_info.name().index;
-        let input_tensor = Tensor::<i64>::new(&[1, 1]).with_values(&[v])?;
+        let input_tensor = Tensor::<i64>::new(&[1, 1]).with_values(&[*v])?;
         int_inputs_args.push((input_op, input_index, input_tensor));
     }
 
