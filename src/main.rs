@@ -1,12 +1,15 @@
-use bitcoincore_rpc::bitcoin::hashes::hex::FromHex;
-use bitcoincore_rpc::bitcoin::Txid;
-use bitcoincore_rpc::jsonrpc::serde_json::Value;
+mod blocks;
+mod transactions;
+
+use crate::blocks::BlocksBuckets;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
-use log::{error, info, warn};
-use std::collections::{HashMap, HashSet};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::error::Error;
-use std::iter::FromIterator;
+use std::fs::File;
+use std::io::Read;
 use std::ops::Sub;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -24,12 +27,20 @@ Min:   1.9 sat/byte  $0.19
 Block height: 666,154
 */
 
+const BLOCK_TARGETS: [u16; 8] = [1, 3, 6, 36, 72, 144, 432, 1008];
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FieldsDescribe {
+    mean: HashMap<String, f32>,
+    std: HashMap<String, f32>,
+    fields: Vec<String>,
+}
+
 #[derive(StructOpt, Debug)]
 pub struct EstimateOptions {
     /// the number of blocks I am ok to wait for, must be between 1 (included) and 1008 (included)
-    /// if absent standard targets `[1,6,36,72,144,432,1008]` are used
     #[structopt(long)]
-    pub blocks_target: Vec<u16>,
+    pub block_target: u16,
 
     /// The path where the model is saved
     #[structopt(long)]
@@ -69,54 +80,83 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("start");
     let options = EstimateOptions::from_args();
 
-    let mut targets = vec![1, 6, 36, 72, 144, 432, 1008];
-    for blocks_target in options.blocks_target.iter() {
-        if *blocks_target == 0 ||    *blocks_target > 1008 {
-            error!("--blocks-target should be between 1 (included) and 1008 (included)");
-            return Ok(());
-        }
-        targets.push(*blocks_target);
+    let mut json_path = options.model_path.clone();
+    json_path.push("mean-std.json");
+
+    let mut model_path = options.model_path.clone();
+    model_path.push("model");
+
+    let mut file = File::open(json_path)?;
+    let mut buffer = vec![];
+    file.read_to_end(&mut buffer)?;
+    let mean_std_fields: FieldsDescribe = serde_json::from_slice(&buffer)?;
+    info!("{:?}", mean_std_fields);
+
+    let block_target = options.block_target;
+
+    if block_target == 0 || block_target > 1008 {
+        error!("--blocks-target should be between 1 (included) and 1008 (included)");
+        return Ok(());
     }
-    targets.sort();
 
-    let model = load_model(&options.model_path)?;
+    let model = load_model(&model_path)?;
 
-    let mut inputs = ModelInputs::default();
+    let mut inputs_map: HashMap<String, f32> = HashMap::new();
     let utc: DateTime<Utc> = Utc::now();
-    let day_of_week = utc.weekday().num_days_from_monday() as i64;
-    //let target = options.blocks_target as f32;
-    let hour = utc.hour() as i64;
-    inputs.ints.insert("day_of_week".to_string(), day_of_week);
-    inputs.ints.insert("hour".to_string(), hour);
+    //inputs.insert()
+    let timestamp = utc.timestamp() as u32;
+    let (buckets, last_block_time) = calculate_buckets(&options)?;
 
-    calculate_buckets(&mut inputs, &options)?;
+    inputs_map.insert(
+        "day_of_week".to_string(),
+        utc.weekday().num_days_from_monday() as f32,
+    );
+    inputs_map.insert("hour".to_string(), utc.hour() as f32);
+    inputs_map.insert(
+        "delta_last".to_string(),
+        (timestamp - last_block_time) as f32,
+    );
+    //
+    for i in 0..=15 {
+        inputs_map.insert(format!("b{}", i), buckets[i] as f32);
+    }
+    info!("inputs_map: {:?}", inputs_map);
+    let mut block_targets = BLOCK_TARGETS.to_vec();
+    block_targets.push(block_target);
+    block_targets.sort();
 
-
-    for confirms_in in targets.iter() {
-        //TODO the model should probably be fed with arrays and only one predict call
-        inputs
-            .floats
-            .insert("confirms_in".to_string(), *confirms_in as f32);
+    for block_target in block_targets {
+        let inputs = calculate_inputs(block_target, &inputs_map, &mean_std_fields);
         let estimate = predict(&inputs, &model)?;
         info!(
             "Estimated fee to enter in {} blocks is {:?} sat/vbyte",
-            confirms_in, estimate
+            block_target, estimate
         );
     }
 
     Ok(())
 }
 
-#[derive(Default)]
-struct ModelInputs {
-    pub floats: HashMap<String, f32>,
-    pub ints: HashMap<String, i64>,
+fn calculate_inputs(
+    block_target: u16,
+    inputs_map: &HashMap<String, f32>,
+    fields: &FieldsDescribe,
+) -> Vec<f32> {
+    let mut result = vec![];
+    let mut inputs_map = inputs_map.clone();
+    inputs_map.insert("confirms_in".to_string(), block_target as f32);
+    for field in fields.fields.iter() {
+        let x = inputs_map.get(field).unwrap();
+        let std = fields.std.get(field).unwrap();
+        let mean = fields.mean.get(field).unwrap();
+        let res = (x - mean) / std;
+        debug!("{}:{} norm:{}", field, x, res);
+        result.push(res)
+    }
+    result
 }
 
-fn calculate_buckets(
-    data: &mut ModelInputs,
-    options: &EstimateOptions,
-) -> Result<(), Box<dyn Error>> {
+fn calculate_buckets(options: &EstimateOptions) -> Result<(Vec<u64>, u32), Box<dyn Error>> {
     let old: DateTime<Utc> = Utc::now().sub(Duration::hours(2));
     info!("old is {}", old);
     let client = options.node_config.make_rpc_client()?;
@@ -124,85 +164,25 @@ fn calculate_buckets(
     let mut blocks_to_ask = vec![];
     let best_block_hash = client.get_best_block_hash()?;
     let mut last = best_block_hash;
-    for _ in 0..6 {
+    for _ in 0..10 {
         blocks_to_ask.push(last);
         let block_info = client.get_block_info(&last)?;
         last = block_info.previousblockhash.expect("found a stale block");
     }
 
     info!("asking blocks {:?}", blocks_to_ask);
-    let mut txs = HashMap::new();
+    let mut bb = BlocksBuckets::new(50, 500.0, 10);
+    let mut time = None;
     for hash in blocks_to_ask {
         let block = client.get_block(&hash)?;
-        for tx in block.txdata {
-            txs.insert(tx.txid(), tx);
+        if block.txdata.len() > 1 && time.is_none() {
+            time = Some(block.header.time);
         }
+        bb.add(block);
     }
+    let buckets = bb.get_buckets().clone().unwrap();
 
-    let test: Value = client.call("getrawmempool", &[Value::Bool(true)])?;
-
-    let mut mempool_txid = vec![];
-    let mut all = 0;
-    for (k, v) in test.as_object().unwrap().iter() {
-        all += 1;
-        let t = v.get("time").unwrap().as_i64().unwrap();
-        let utc = Utc.timestamp(t, 0);
-        if utc > old {
-            // if a tx in mempool is too old, it's unlikely it has tx inputs in last 6 blocks
-            // this way we are asking a lot less txs to the node for big mempools
-            mempool_txid.push(Txid::from_hex(k)?);
-        }
-    }
-
-    info!("all mempool txs {}, not old: {}", all, mempool_txid.len());
-    let mut count = 0;
-    let mut mempool_bucket = MempoolBuckets::new(50, 500.0);
-    for (i, txid) in mempool_txid.iter().enumerate() {
-        if let Some(limit) = options.limit.as_ref() {
-            if *limit < i {
-                break;
-            }
-        }
-        // get_raw_transaction should always work for mempool txs, however some tx may have been replaced
-        if let Ok(tx) = client.get_raw_transaction(txid, None) {
-            let prev_out_value: Vec<_> = tx
-                .input
-                .iter()
-                .filter_map(|i| {
-                    txs.get(&i.previous_output.txid)
-                        .map(|tx| tx.output[i.previous_output.vout as usize].value)
-                })
-                .collect();
-            if prev_out_value.len() == tx.input.len() {
-                count += 1;
-                let sum_input: u64 = prev_out_value.iter().sum();
-                let sum_outut: u64 = tx.output.iter().map(|o| o.value).sum();
-                let fee = sum_input - sum_outut;
-                let fee_rate = (fee as f64) / (tx.get_weight() as f64 / 4.0);
-                mempool_bucket.add(*txid, fee_rate);
-            }
-        }
-    }
-    info!(
-        "mempool_txid:{} of which with input in last 6 blocks:{} ({:.1}%)",
-        mempool_txid.len(),
-        count,
-        (count as f64 * 100.0) / (mempool_txid.len() as f64)
-    );
-
-    info!("mempool buckets {:?}", mempool_bucket.buckets);
-    let tx_considered = mempool_bucket.buckets.iter().sum::<u32>();
-    if tx_considered == 0 {
-        error!("Can't estimate any tx fee rate in mempool, estimation could be very bad...")
-    } else if tx_considered < 100 {
-        warn!("Could estimate less than 100 tx fee rate in mempool, estimation could be bad...")
-    }
-
-    for (i, v) in mempool_bucket.buckets.iter().enumerate() {
-        data.floats.insert(format!("a{}", i), *v as f32);
-    }
-
-    Ok(())
+    Ok((buckets, time.unwrap()))
 }
 
 fn load_model(model_path: &PathBuf) -> Result<(Graph, SavedModelBundle), Box<dyn Error>> {
@@ -215,7 +195,7 @@ fn load_model(model_path: &PathBuf) -> Result<(Graph, SavedModelBundle), Box<dyn
     Ok((graph, bundle))
 }
 
-fn predict(inputs: &ModelInputs, model: &(Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
+fn predict(inputs: &[f32], model: &(Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
     let (graph, bundle) = model;
     let sig = bundle
         .meta_graph_def()
@@ -223,31 +203,12 @@ fn predict(inputs: &ModelInputs, model: &(Graph, SavedModelBundle)) -> Result<f3
     //info!("{:#?}", sig.inputs());
     //info!("{:#?}", sig.outputs());
 
-    let mut float_inputs_args = vec![];
-    for (k, v) in inputs.floats.iter() {
-        let input_info = sig.get_input(&k)?;
-        let input_op = graph.operation_by_name_required(&input_info.name().name)?;
-        let input_index = input_info.name().index;
-        let input_tensor = Tensor::<f32>::new(&[1, 1]).with_values(&[*v])?;
-        float_inputs_args.push((input_op, input_index, input_tensor));
-    }
-
-    let mut int_inputs_args = vec![];
-    for (k, v) in inputs.ints.iter() {
-        let input_info = sig.get_input(&k)?;
-        let input_op = graph.operation_by_name_required(&input_info.name().name)?;
-        let input_index = input_info.name().index;
-        let input_tensor = Tensor::<i64>::new(&[1, 1]).with_values(&[*v])?;
-        int_inputs_args.push((input_op, input_index, input_tensor));
-    }
-
+    let input_info = sig.get_input("dense_input")?;
+    let input_op = graph.operation_by_name_required(&input_info.name().name)?;
+    let input_index = input_info.name().index;
+    let input_tensor = Tensor::<f32>::new(&[1, 20]).with_values(inputs)?;
     let mut run_args = SessionRunArgs::new();
-    for input in float_inputs_args.iter() {
-        run_args.add_feed(&input.0, input.1, &input.2);
-    }
-    for input in int_inputs_args.iter() {
-        run_args.add_feed(&input.0, input.1, &input.2);
-    }
+    run_args.add_feed(&input_op, input_index, &input_tensor);
 
     let output_info = sig.get_output("dense_2")?;
     let output_op = graph.operation_by_name_required(&output_info.name().name)?;
@@ -259,82 +220,3 @@ fn predict(inputs: &ModelInputs, model: &(Graph, SavedModelBundle)) -> Result<f3
 
     Ok(output[0])
 }
-
-pub struct MempoolBuckets {
-    /// contain the number of elements for bucket ith
-    buckets: Vec<u32>,
-    /// contain the fee rate limits for every bucket ith
-    buckets_limits: Vec<f64>,
-    /// in which bucket the Txid is in
-    tx_bucket: HashMap<Txid, usize>,
-}
-
-impl MempoolBuckets {
-    pub fn new(increment_percent: u32, upper_limit: f64) -> Self {
-        let mut buckets_limits = vec![];
-        let increment_percent = 1.0f64 + (increment_percent as f64 / 100.0f64);
-        let mut current_value = 1.0f64;
-        loop {
-            if current_value >= upper_limit {
-                break;
-            }
-            current_value *= increment_percent;
-            buckets_limits.push(current_value);
-        }
-        let buckets = vec![0u32; buckets_limits.len()];
-
-        MempoolBuckets {
-            buckets,
-            buckets_limits,
-            tx_bucket: HashMap::new(),
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.tx_bucket.clear();
-        for el in self.buckets.iter_mut() {
-            *el = 0;
-        }
-    }
-
-    pub fn add(&mut self, txid: Txid, rate: f64) {
-        if rate > 1.0 && self.tx_bucket.get(&txid).is_none() {
-            let index = self
-                .buckets_limits
-                .iter()
-                .position(|e| e > &rate)
-                .unwrap_or(self.buckets_limits.len() - 1);
-            self.buckets[index] += 1;
-            self.tx_bucket.insert(txid, index);
-        }
-    }
-
-    pub fn remove(&mut self, txid: &Txid) {
-        if let Some(index) = self.tx_bucket.remove(txid) {
-            self.buckets[index] -= 1;
-        }
-    }
-
-    pub fn number_of_buckets(&self) -> usize {
-        self.buckets.len()
-    }
-
-    pub fn buckets_str(&self) -> String {
-        self.buckets
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
-    pub fn len(&self) -> usize {
-        self.tx_bucket.len()
-    }
-
-    pub fn txids_set(&self) -> HashSet<&Txid> {
-        HashSet::from_iter(self.tx_bucket.keys())
-    }
-}
-
-// index confirms_in	fee_rate	a0	a1	a2	a3	a4	a5	a6	a7	a8	a9	a10	a11	a12	a13	a14	a15	day_of_week	hour	prediction
-// 1422873	2	122.58	476	299	337	409	342	251	248	369	102	216	845	1626	182	81	9	1	3	17	126.660774
