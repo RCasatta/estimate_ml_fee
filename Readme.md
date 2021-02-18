@@ -1,6 +1,6 @@
 # Bitcoin fee estimation with machine learning
 
-Estimate the fee_rate needed in `[sat/vbyte]` to enter the blockchain waiting `block-target` blocks
+Estimate the fee_rate needed in `[sat/vbyte]` to enter in a range of target
 
 ## Requirements
 
@@ -9,10 +9,17 @@ Get needed informations from a running local bitcoin core node (pruned nodes are
 ## Example
 
 ```
-$ cargo run --release -- --blocks-target 30 --cookie-path $HOME/.bitcoin/.cookie --rpc-address http://127.0.0.1:8332 --model-path 20210113-160351-model
-...
-[2021-01-13T14:56:17Z INFO  estimate_ml_fee] all mempool txs 8265, not old: 3807
-[2021-01-13T14:56:18Z INFO  estimate_ml_fee] mempool_txid:3807 of which with input in last 6 blocks:348 (9.1%)
-[2021-01-13T14:56:18Z INFO  estimate_ml_fee] mempool buckets [1, 2, 3, 4, 4, 15, 11, 65, 29, 62, 16, 37, 73, 25, 0, 1]
-[2021-01-13T14:56:18Z INFO  estimate_ml_fee] Estimated fee to enter in 30 blocks is 44.309048 sat/vbyte
+$ cargo run --release -- --cookie-path $HOME/.bitcoin/.cookie --rpc-address http://127.0.0.1:8332
+[2021-02-17T18:58:57Z INFO  estimate_ml_fee] start
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] Blocks asked to node
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] load elapsed: 1.473515ms
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:1 f:153.48785
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:3 f:120.43874
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:6 f:108.100815
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:36 f:23.592606
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:72 f:16.325903
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:144 f:12.416816
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:432 f:8.3061905
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] i:1008 f:5.199027
+[2021-02-17T18:58:58Z INFO  estimate_ml_fee] estimate elapsed: 1.431968ms
 ```
