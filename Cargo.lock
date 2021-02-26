@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "bitcoin-fee-model"
 version = "0.1.0"
-source = "git+https://github.com/RCasatta/bitcoin-fee-model#e4bccfcf195862def68834a5a49ce07894eac597"
+source = "git+https://github.com/bitcoindevkit/bitcoin-fee-model?rev=189ab07a9aef6fa06397ab34010d8820c1396c00#189ab07a9aef6fa06397ab34010d8820c1396c00"
 dependencies = [
  "chrono",
  "serde",
