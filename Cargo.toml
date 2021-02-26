@@ -12,4 +12,4 @@ structopt = "0.3.21"
 env_logger = "0.8.2"
 chrono = "0.4"
 log = "0.4.13"
-bitcoin-fee-model = { git="https://github.com/RCasatta/bitcoin-fee-model"}
+bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", rev="91f034d49be1e8acc92bc20778259bf5771b34cc"}

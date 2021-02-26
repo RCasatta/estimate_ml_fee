@@ -1,8 +1,9 @@
 mod transactions;
 
 use crate::transactions::Transactions;
+use bitcoin_fee_model::{get_model_high, get_model_low};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use log::info;
+use log::{info, trace};
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Instant;
@@ -50,12 +51,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (buckets, last_block_time) = calculate_rates(&opt)?;
     let now = Instant::now();
-    let model = bitcoin_fee_model::FeeModel::new();
+
+    let model = bitcoin_fee_model::FeeModel::new(get_model_low(), get_model_high());
     info!("load elapsed: {:?}", now.elapsed());
     let now = Instant::now();
-    for i in BLOCK_TARGETS.iter() {
-        let f = model.estimate(*i, None, &buckets, last_block_time)?;
-        info!("i:{} f:{}", i, f);
+    for _ in 0..10_000 {
+        for i in BLOCK_TARGETS.iter() {
+            let f = model.estimate(*i, None, &buckets, last_block_time)?;
+            trace!("i:{} f:{}", i, f);
+        }
     }
     info!("estimate elapsed: {:?}", now.elapsed());
 
