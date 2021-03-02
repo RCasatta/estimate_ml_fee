@@ -1,10 +1,8 @@
-mod transactions;
-
-use crate::transactions::Transactions;
-use bitcoin_fee_model::{get_model_high, get_model_low};
+use bitcoin_fee_model::process_blocks;
+use bitcoin_fee_model::{bitcoin, get_model_high, get_model_low};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use log::{info, trace};
-use std::collections::HashMap;
+use log::info;
+use std::convert::TryInto;
 use std::error::Error;
 use std::time::Instant;
 use structopt::StructOpt;
@@ -49,46 +47,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("start");
     let opt = NodeConfig::from_args();
 
-    let (buckets, last_block_time) = calculate_rates(&opt)?;
+    let blocks = get_blocks(&opt)?;
+    let (fee_rates, last_block_time) = process_blocks(&blocks)?;
     let now = Instant::now();
 
     let model = bitcoin_fee_model::FeeModel::new(get_model_low(), get_model_high());
     info!("load elapsed: {:?}", now.elapsed());
     let now = Instant::now();
-    for _ in 0..10_000 {
-        for i in BLOCK_TARGETS.iter() {
-            let f = model.estimate(*i, None, &buckets, last_block_time)?;
-            trace!("i:{} f:{}", i, f);
-        }
+
+    for i in BLOCK_TARGETS.iter() {
+        let f = model.estimate(*i, None, &fee_rates, last_block_time)?;
+        info!("i:{} f:{}", i, f);
     }
+
     info!("estimate elapsed: {:?}", now.elapsed());
 
     Ok(())
 }
 
-fn calculate_rates(options: &NodeConfig) -> Result<(Vec<f64>, u32), Box<dyn Error>> {
-    let mut map = HashMap::new();
+const BLOCKS: usize = 10;
+
+fn get_blocks(options: &NodeConfig) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
     let client = options.make_rpc_client()?;
 
     let mut hash = client.get_best_block_hash()?;
+    let mut blocks = vec![];
 
-    let mut time = None;
-    for _ in 0..10 {
+    for _ in 0..BLOCKS {
         let block = client.get_block(&hash)?;
-        if block.txdata.len() > 1 && time.is_none() {
-            time = Some(block.header.time);
-        }
         hash = block.header.prev_blockhash;
-        for tx in block.txdata {
-            map.insert(tx.txid(), tx);
-        }
+        blocks.push(block);
     }
+    blocks.reverse();
+    let blocks: [bitcoin::Block; BLOCKS] = blocks.try_into().unwrap();
     info!("Blocks asked to node");
 
-    let txs = Transactions::from_txs(map);
-    let rates = txs.fee_rates();
-
-    Ok((rates, time.unwrap()))
+    Ok(blocks)
 }
 
 /*

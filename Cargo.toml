@@ -7,9 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bitcoincore-rpc = "0.12.0"
+bitcoincore-rpc = "0.13.0"
 structopt = "0.3.21"
 env_logger = "0.8.2"
 chrono = "0.4"
 log = "0.4.13"
-bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", rev="91f034d49be1e8acc92bc20778259bf5771b34cc"}
+bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", branch="bitcoin_feature", features = ["use-bitcoin"]}
+#bitcoin-fee-model = { path="../bitcoin-fee-model", features = ["use-bitcoin"] }
