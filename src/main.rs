@@ -1,14 +1,17 @@
 use bitcoin_fee_model::process_blocks;
 use bitcoin_fee_model::{bitcoin, get_model_high, get_model_low};
+use bitcoincore_rpc::bitcoin::consensus::serialize;
+use bitcoincore_rpc::bitcoin::Block;
+use bitcoincore_rpc::bitcoincore_rpc_json::bitcoin::consensus::Decodable;
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use log::{info, debug};
+use log::{debug, info};
 use std::convert::TryInto;
+use std::env;
 use std::error::Error;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::time::Instant;
 use structopt::StructOpt;
-use std::io::{Read, BufReader};
-use bitcoincore_rpc::bitcoincore_rpc_json::bitcoin::consensus::{deserialize, Decodable};
-use bitcoincore_rpc::bitcoin::Block;
 
 /*
 Next: 129.6 sat/byte  $12.47
@@ -34,7 +37,7 @@ enum Command {
 
 #[derive(StructOpt, Debug)]
 pub struct EsploraConfig {
-    #[structopt(long, default_value="https://blockstream.info/api/")]
+    #[structopt(long, default_value = "https://blockstream.info/api/")]
     pub url: String,
 }
 
@@ -87,25 +90,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 const BLOCKS: usize = 10;
 
-fn get_blocks_from_esplora(conf: &EsploraConfig) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
+fn get_blocks_from_esplora(
+    conf: &EsploraConfig,
+) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
     let mut blocks = vec![];
 
     let height: u32 = ureq::get(&format!("{}/blocks/tip/height", conf.url))
         .call()?
-        .into_string()?.parse()?;
+        .into_string()?
+        .parse()?;
     debug!("Blockchain height:{}", height);
 
-    for i in height-10..height {
+    for i in height - 10..height {
         let hash = ureq::get(&format!("{}/block-height/{}", conf.url, i))
             .call()?
             .into_string()?;
         debug!("Block height {} hash: {}", i, hash);
 
-        let reader = ureq::get(&format!("{}/block/{}/raw", conf.url, hash))
-            .call()?.into_reader();
-        let mut buf_reader = BufReader::new(reader);
-        let block: Block = Decodable::consensus_decode(&mut buf_reader)?;
-        debug!("Got block {}, size: {}", hash, block.get_size());
+        let block = match check_cache(&hash) {
+            Ok(block) => {
+                debug!("Cache hit block {}, size: {}", hash, block.get_size());
+                block
+            }
+            Err(_) => {
+                let reader = ureq::get(&format!("{}/block/{}/raw", conf.url, hash))
+                    .call()?
+                    .into_reader();
+                let mut buf_reader = BufReader::new(reader);
+                let block: Block = Decodable::consensus_decode(&mut buf_reader)?;
+                write_cache(&hash, &block)?;
+                debug!("Got block {}, size: {}", hash, block.get_size());
+                block
+            }
+        };
+
         blocks.push(block);
     }
 
@@ -132,45 +150,19 @@ fn get_blocks_from_node(options: &NodeConfig) -> Result<[bitcoin::Block; BLOCKS]
     Ok(blocks)
 }
 
-/*
-a1 = input.dot(weights['dense/kernel:0'])
-a2 = a1 + weights['dense/bias:0']
-a3 = a2.clip(0) # relu
-
-b1 = a3.dot(weights['dense_1/kernel:0'])
-b2 = b1 + weights['dense_1/bias:0']
-b3 = b2.clip(0) # relu
-
-c1 = b3.dot(weights['dense_2/kernel:0'])
-c2 = c1 + weights['dense_2/bias:0']
-
-c2
-*/
-
-/*
-fn predict(inputs: &[f32], model: &(Graph, SavedModelBundle)) -> Result<f32, Box<dyn Error>> {
-    let (graph, bundle) = model;
-    let sig = bundle
-        .meta_graph_def()
-        .get_signature(tensorflow::DEFAULT_SERVING_SIGNATURE_DEF_KEY)?;
-    //info!("{:#?}", sig.inputs());
-    //info!("{:#?}", sig.outputs());
-
-    let input_info = sig.get_input("dense_input")?;
-    let input_op = graph.operation_by_name_required(&input_info.name().name)?;
-    let input_index = input_info.name().index;
-    let input_tensor = Tensor::<f32>::new(&[1, 20]).with_values(inputs)?;
-    let mut run_args = SessionRunArgs::new();
-    run_args.add_feed(&input_op, input_index, &input_tensor);
-
-    let output_info = sig.get_output("dense_2")?;
-    let output_op = graph.operation_by_name_required(&output_info.name().name)?;
-    let output_index = output_info.name().index;
-    let output_fetch = run_args.request_fetch(&output_op, output_index);
-
-    bundle.session.run(&mut run_args)?;
-    let output = run_args.fetch::<f32>(output_fetch)?;
-
-    Ok(output[0])
+fn check_cache(hash: &str) -> Result<Block, Box<dyn Error>> {
+    let mut temp_dir = env::temp_dir();
+    temp_dir.push(hash);
+    let file = File::open(temp_dir)?;
+    let mut buf_reader = BufReader::new(file);
+    let block: Block = Decodable::consensus_decode(&mut buf_reader)?;
+    Ok(block)
 }
-*/
+
+fn write_cache(hash: &str, block: &Block) -> Result<(), Box<dyn Error>> {
+    let mut temp_dir = env::temp_dir();
+    temp_dir.push(hash);
+    let mut file = File::create(temp_dir)?;
+    file.write(&serialize(block))?;
+    Ok(())
+}
