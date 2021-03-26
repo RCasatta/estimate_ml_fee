@@ -1,11 +1,14 @@
 use bitcoin_fee_model::process_blocks;
 use bitcoin_fee_model::{bitcoin, get_model_high, get_model_low};
 use bitcoincore_rpc::{Auth, Client, RpcApi};
-use log::info;
+use log::{info, debug};
 use std::convert::TryInto;
 use std::error::Error;
 use std::time::Instant;
 use structopt::StructOpt;
+use std::io::{Read, BufReader};
+use bitcoincore_rpc::bitcoincore_rpc_json::bitcoin::consensus::{deserialize, Decodable};
+use bitcoincore_rpc::bitcoin::Block;
 
 /*
 Next: 129.6 sat/byte  $12.47
@@ -20,6 +23,20 @@ Block height: 666,154
 */
 
 const BLOCK_TARGETS: [u16; 9] = [1, 2, 3, 6, 36, 72, 144, 432, 1008];
+
+#[derive(StructOpt, Debug)]
+enum Command {
+    /// Gather last 10 block through a local running node
+    Node(NodeConfig),
+    /// Gather last 10 block from an esplora service
+    Esplora(EsploraConfig),
+}
+
+#[derive(StructOpt, Debug)]
+pub struct EsploraConfig {
+    #[structopt(long, default_value="https://blockstream.info/api/")]
+    pub url: String,
+}
 
 #[derive(StructOpt, Debug)]
 pub struct NodeConfig {
@@ -45,9 +62,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
     info!("start");
-    let opt = NodeConfig::from_args();
+    let opt = Command::from_args();
+    let blocks = match opt {
+        Command::Node(conf) => get_blocks_from_node(&conf)?,
+        Command::Esplora(conf) => get_blocks_from_esplora(&conf)?,
+    };
 
-    let blocks = get_blocks(&opt)?;
     let (fee_rates, last_block_time) = process_blocks(&blocks)?;
     let now = Instant::now();
 
@@ -67,7 +87,34 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 const BLOCKS: usize = 10;
 
-fn get_blocks(options: &NodeConfig) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
+fn get_blocks_from_esplora(conf: &EsploraConfig) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
+    let mut blocks = vec![];
+
+    let height: u32 = ureq::get(&format!("{}/blocks/tip/height", conf.url))
+        .call()?
+        .into_string()?.parse()?;
+    debug!("Blockchain height:{}", height);
+
+    for i in height-10..height {
+        let hash = ureq::get(&format!("{}/block-height/{}", conf.url, i))
+            .call()?
+            .into_string()?;
+        debug!("Block height {} hash: {}", i, hash);
+
+        let reader = ureq::get(&format!("{}/block/{}/raw", conf.url, hash))
+            .call()?.into_reader();
+        let mut buf_reader = BufReader::new(reader);
+        let block: Block = Decodable::consensus_decode(&mut buf_reader)?;
+        debug!("Got block {}, size: {}", hash, block.get_size());
+        blocks.push(block);
+    }
+
+    let blocks: [bitcoin::Block; BLOCKS] = blocks.try_into().unwrap();
+
+    Ok(blocks)
+}
+
+fn get_blocks_from_node(options: &NodeConfig) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
     let client = options.make_rpc_client()?;
 
     let mut hash = client.get_best_block_hash()?;

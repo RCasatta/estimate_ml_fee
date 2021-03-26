@@ -12,5 +12,6 @@ structopt = "0.3.21"
 env_logger = "0.8.2"
 chrono = "0.4"
 log = "0.4.13"
+ureq = "2.1.0"
 bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", branch="bitcoin_feature", features = ["use-bitcoin"]}
 #bitcoin-fee-model = { path="../bitcoin-fee-model", features = ["use-bitcoin"] }
