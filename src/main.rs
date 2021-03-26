@@ -37,7 +37,7 @@ enum Command {
 
 #[derive(StructOpt, Debug)]
 pub struct EsploraConfig {
-    #[structopt(long, default_value = "https://blockstream.info/api/")]
+    #[structopt(long, default_value = "https://blockstream.info/api")]
     pub url: String,
 }
 
@@ -66,12 +66,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     info!("start");
     let opt = Command::from_args();
+
+    let now = Instant::now();
     let blocks = match opt {
         Command::Node(conf) => get_blocks_from_node(&conf)?,
         Command::Esplora(conf) => get_blocks_from_esplora(&conf)?,
     };
+    info!("getting blocks: {:?}", now.elapsed());
 
+    let now = Instant::now();
     let (fee_rates, last_block_time) = process_blocks(&blocks)?;
+    info!("process blocks: {:?}", now.elapsed());
+
     let now = Instant::now();
 
     let model = bitcoin_fee_model::FeeModel::new(get_model_low(), get_model_high());
@@ -95,18 +101,12 @@ fn get_blocks_from_esplora(
 ) -> Result<[bitcoin::Block; BLOCKS], Box<dyn Error>> {
     let mut blocks = vec![];
 
-    let height: u32 = ureq::get(&format!("{}/blocks/tip/height", conf.url))
+    let mut hash: String = ureq::get(&format!("{}/blocks/tip/hash", conf.url))
         .call()?
-        .into_string()?
-        .parse()?;
-    debug!("Blockchain height:{}", height);
+        .into_string()?;
+    info!("Blockchain hash tip:{}", hash);
 
-    for i in height - 10..height {
-        let hash = ureq::get(&format!("{}/block-height/{}", conf.url, i))
-            .call()?
-            .into_string()?;
-        debug!("Block height {} hash: {}", i, hash);
-
+    for _ in 0..BLOCKS {
         let block = match check_cache(&hash) {
             Ok(block) => {
                 debug!("Cache hit block {}, size: {}", hash, block.get_size());
@@ -119,13 +119,19 @@ fn get_blocks_from_esplora(
                 let mut buf_reader = BufReader::new(reader);
                 let block: Block = Decodable::consensus_decode(&mut buf_reader)?;
                 write_cache(&hash, &block)?;
-                debug!("Got block {}, size: {}", hash, block.get_size());
+                info!(
+                    "Got block {} from esplora, size: {}",
+                    hash,
+                    block.get_size()
+                );
                 block
             }
         };
+        hash = block.header.prev_blockhash.to_string();
 
         blocks.push(block);
     }
+    blocks.reverse();
 
     let blocks: [bitcoin::Block; BLOCKS] = blocks.try_into().unwrap();
 
@@ -139,7 +145,19 @@ fn get_blocks_from_node(options: &NodeConfig) -> Result<[bitcoin::Block; BLOCKS]
     let mut blocks = vec![];
 
     for _ in 0..BLOCKS {
-        let block = client.get_block(&hash)?;
+        let block = match check_cache(&hash.to_string()) {
+            Ok(block) => {
+                debug!("Cache hit block {}, size: {}", hash, block.get_size());
+                block
+            }
+            Err(_) => {
+                let block = client.get_block(&hash)?;
+                write_cache(&hash.to_string(), &block)?;
+                debug!("Got block {} from node, size: {}", hash, block.get_size());
+                block
+            }
+        };
+
         hash = block.header.prev_blockhash;
         blocks.push(block);
     }
