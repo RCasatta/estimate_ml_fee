@@ -72,7 +72,7 @@ dependencies = [
 [[package]]
 name = "bitcoin-fee-model"
 version = "0.1.0"
-source = "git+https://github.com/bitcoindevkit/bitcoin-fee-model?branch=bitcoin_feature#32d3736acb3c4521760b1248ac57c168a31fd42c"
+source = "git+https://github.com/bitcoindevkit/bitcoin-fee-model?branch=update_models#2fe12dd645881fc857f406be1b7c2f7e92c6d683"
 dependencies = [
  "bitcoin",
  "chrono",
