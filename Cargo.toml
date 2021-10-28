@@ -13,5 +13,6 @@ env_logger = "0.8.2"
 chrono = "0.4"
 log = "0.4.13"
 ureq = "2.1.0"
-bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", branch="update_models", features = ["use-bitcoin"]}
+#bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model", branch="model_update", features = ["use-bitcoin"]}
+bitcoin-fee-model = { git="https://github.com/bitcoindevkit/bitcoin-fee-model",rev="4f2728dd3e3c77313429e1822312ee93e66bc58a", features = ["use-bitcoin"]}
 #bitcoin-fee-model = { path="../bitcoin-fee-model", features = ["use-bitcoin"] }
